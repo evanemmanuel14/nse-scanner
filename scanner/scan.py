@@ -17,21 +17,27 @@ INTERVAL = "5m"          # 5m is most reliable for yfinance intraday
 PERIOD = "5d"            # enough bars for rolling indicators
 
 SCORE_MIN = 7            # alert threshold
-VOL_MULT = 1.3           # ✅ your request (volume pickup threshold)
-
-# Cooldown is optional now (since once/day rule is strict),
-# but we keep it as extra protection for edge cases.
-COOLDOWN_MIN = 45
+VOL_MULT = 1.3           # volume pickup threshold
+COOLDOWN_MIN = 45        # extra safety (even with once/day rule)
 
 MKT_OPEN = time(9, 15)
 MKT_CLOSE = time(15, 30)
 
-# 20-symbol watchlist (replace with yours anytime)
+# Index filter (NIFTY 50)
+INDEX_SYMBOL = "^NSEI"
+
+# Expanded watchlist (clean liquid large caps + your adds)
 WATCHLIST = [
     "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
-    "SBIN.NS", "ITC.NS", "LT.NS", "AXISBANK.NS", "BHARTIARTL.NS",
-    "KOTAKBANK.NS", "HINDUNILVR.NS", "BAJFINANCE.NS",
-    "SUNPHARMA.NS", "TITAN.NS", "WIPRO.NS", "ONGC.NS", "NTPC.NS","PFC.NS", "RECLTD.NS"
+    "KOTAKBANK.NS", "AXISBANK.NS", "SBIN.NS", "LT.NS", "ITC.NS",
+    "HINDUNILVR.NS", "BAJFINANCE.NS", "BHARTIARTL.NS", "ASIANPAINT.NS",
+    "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "ONGC.NS", "NTPC.NS",
+    "POWERGRID.NS", "ULTRACEMCO.NS", "TECHM.NS", "HCLTECH.NS", "WIPRO.NS",
+    "ADANIENT.NS", "ADANIPORTS.NS", "COALINDIA.NS", "BPCL.NS", "IOC.NS",
+    "TATAMOTORS.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "HDFCLIFE.NS",
+    "SBILIFE.NS", "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS",
+    "GRASIM.NS", "HEROMOTOCO.NS", "INDUSINDBK.NS", "LTIM.NS",
+    "NESTLEIND.NS", "RECLTD.NS", "PFC.NS"
 ]
 
 TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -89,8 +95,7 @@ def load_state() -> dict:
           "PULLBACK_LONG_2025-12-19": true,
           "PULLBACK_SHORT_2025-12-19": true
         }
-      },
-      ...
+      }
     }
     """
     if not os.path.exists(STATE_PATH):
@@ -124,7 +129,6 @@ def in_cooldown(state: dict, sym: str) -> bool:
     return cu is not None and utc_now() < cu
 
 def already_alerted_today(state: dict, sym: str, sig_type: str) -> bool:
-    # once per day per symbol per direction
     day = today_ist_str()
     key = f"{sig_type}_{day}"
     return bool(state.get(sym, {}).get("alerts", {}).get(key, False))
@@ -137,9 +141,6 @@ def mark_alerted_today(state: dict, sym: str, sig_type: str):
     state[sym]["alerts"][key] = True
 
 def prune_old_alerts(state: dict, keep_days: int = 10):
-    """
-    Keep state.json small by keeping only last N days of alert keys.
-    """
     cutoff = (now_ist().date() - timedelta(days=keep_days))
     for sym, blob in list(state.items()):
         alerts = blob.get("alerts", {})
@@ -147,7 +148,6 @@ def prune_old_alerts(state: dict, keep_days: int = 10):
             continue
         new_alerts = {}
         for k, v in alerts.items():
-            # key format: TYPE_YYYY-MM-DD
             parts = k.rsplit("_", 1)
             if len(parts) != 2:
                 continue
@@ -196,14 +196,12 @@ def ensure_ist_index(df: pd.DataFrame) -> pd.DataFrame:
     return df.tz_convert(TZ)
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # Typical price
     tp = (df["High"] + df["Low"] + df["Close"]) / 3.0
     vol = df["Volume"].astype(float)
 
     # VWAP (cumulative over fetched window; good enough for confirmation)
     df["VWAP"] = (tp * vol).cumsum() / (vol.cumsum().replace(0, np.nan))
 
-    # VWMA helper
     def vwma(close, v, length):
         num = (close * v).rolling(length).sum()
         den = v.rolling(length).sum()
@@ -212,7 +210,6 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["VWMA20"] = vwma(df["Close"], vol, 20)
     df["VWMA50"] = vwma(df["Close"], vol, 50)
 
-    # ATR(14)
     prev_close = df["Close"].shift(1)
     tr = pd.concat([
         (df["High"] - df["Low"]),
@@ -221,10 +218,46 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ], axis=1).max(axis=1)
     df["ATR14"] = tr.rolling(14).mean()
 
-    # Volume baseline
     df["VolAvg20"] = vol.rolling(20).mean()
-
     return df
+
+
+# =========================
+# NIFTY Index trend
+# =========================
+def get_index_trend() -> str | None:
+    """
+    Returns:
+      'BULL' if NIFTY > VWAP
+      'BEAR' if NIFTY < VWAP
+      None  if data unavailable
+    """
+    try:
+        df = yf.download(
+            tickers=INDEX_SYMBOL,
+            interval=INTERVAL,
+            period=PERIOD,
+            progress=False
+        )
+        if df is None or df.empty:
+            return None
+
+        df = ensure_ist_index(df)
+        df = compute_indicators(df)
+        latest = df.iloc[-1]
+
+        if pd.isna(latest["VWAP"]):
+            return None
+
+        if latest["Close"] > latest["VWAP"]:
+            return "BULL"
+        elif latest["Close"] < latest["VWAP"]:
+            return "BEAR"
+        else:
+            return None
+    except Exception as e:
+        print("Index trend error:", e)
+        return None
 
 
 # =========================
@@ -266,15 +299,11 @@ def pullback_long_signal(df: pd.DataFrame):
     if math.isnan(swing):
         return None
 
-    # Pullback touch within last 6 candles (~30 mins on 5m)
     recent = df.iloc[-7:-1]
-    touched_vwap = (recent["Low"] <= (recent["VWAP"] * 1.002)).any()   # within 0.2%
+    touched_vwap = (recent["Low"] <= (recent["VWAP"] * 1.002)).any()
     touched_vwma = (recent["Low"] <= (recent["VWMA20"] * 1.002)).any()
 
-    # Continuation trigger: close breaks swing high with small buffer
-    broke_swing = latest["Close"] > swing * 1.001  # 0.1% buffer
-
-    # Strength candle: green + close rising
+    broke_swing = latest["Close"] > swing * 1.001
     strength = (latest["Close"] > prev["Close"]) and (latest["Close"] > latest["Open"])
 
     if not ((touched_vwap or touched_vwma) and strength and broke_swing):
@@ -311,7 +340,7 @@ def pullback_short_signal(df: pd.DataFrame):
     touched_vwap = (recent["High"] >= (recent["VWAP"] * 0.998)).any()
     touched_vwma = (recent["High"] >= (recent["VWMA20"] * 0.998)).any()
 
-    broke_swing = latest["Close"] < swing * 0.999  # 0.1% buffer
+    broke_swing = latest["Close"] < swing * 0.999
     strength = (latest["Close"] < prev["Close"]) and (latest["Close"] < latest["Open"])
 
     if not ((touched_vwap or touched_vwma) and strength and broke_swing):
@@ -330,13 +359,13 @@ def pullback_short_signal(df: pd.DataFrame):
 
     return {"type": "PULLBACK_SHORT", "score": score, "reasons": reasons, "price": float(latest["Close"])}
 
-
-def format_alert(symbol: str, sig: dict, bar_time_ist: datetime) -> str:
+def format_alert(symbol: str, sig: dict, bar_time_ist: datetime, index_trend: str) -> str:
     direction = "🟢 LONG" if sig["type"] == "PULLBACK_LONG" else "🔴 SHORT"
     reasons = "\n".join([f"• {r}" for r in sig["reasons"]])
     return (
         f"{direction} Pullback Trend Alert\n\n"
         f"Symbol: {symbol}\n"
+        f"Index filter: NIFTY {index_trend} (vs VWAP)\n"
         f"TF: {INTERVAL}\n"
         f"Time (IST): {bar_time_ist.strftime('%Y-%m-%d %H:%M')}\n"
         f"Price: {sig['price']:.2f}\n"
@@ -352,6 +381,7 @@ def format_alert(symbol: str, sig: dict, bar_time_ist: datetime) -> str:
 # =========================
 def main():
     dt_ist = now_ist()
+
     # Only run during market hours
     if not in_market_hours(dt_ist):
         print("Outside NSE market hours (IST) — exiting.")
@@ -360,6 +390,14 @@ def main():
     state = load_state()
     prune_old_alerts(state, keep_days=10)
 
+    # Index trend gate
+    index_trend = get_index_trend()
+    print("NIFTY trend:", index_trend)
+
+    if index_trend is None:
+        print("Index trend unavailable — skipping run.")
+        return
+
     frames = fetch_intraday(WATCHLIST)
     if not frames:
         print("No data returned.")
@@ -367,6 +405,7 @@ def main():
         return
 
     alerts_sent = 0
+    _seen_alerts = set()
 
     for sym in WATCHLIST:
         df = frames.get(sym)
@@ -380,7 +419,12 @@ def main():
         df = compute_indicators(df)
         bar_time_ist = df.index[-1].to_pydatetime()
 
-        sig = pullback_long_signal(df) or pullback_short_signal(df)
+        sig = None
+        if index_trend == "BULL":
+            sig = pullback_long_signal(df)
+        elif index_trend == "BEAR":
+            sig = pullback_short_signal(df)
+
         if not sig:
             continue
 
@@ -389,22 +433,22 @@ def main():
 
         sig_type = sig["type"]
 
-        # ✅ Once per day per symbol per direction
+        # Once per day per symbol per direction
         if already_alerted_today(state, sym, sig_type):
             continue
 
-        # Extra cooldown (optional)
+        # Optional cooldown safety
         if in_cooldown(state, sym):
             continue
 
-        # Dedupe within this single run (safety)
+        # Dedupe within this run
         run_key = f"{sym}:{sig_type}:{bar_time_ist.strftime('%Y%m%d%H%M')}"
         if run_key in _seen_alerts:
             continue
         _seen_alerts.add(run_key)
 
         # Send alert
-        msg = format_alert(sym, sig, bar_time_ist)
+        msg = format_alert(sym, sig, bar_time_ist, index_trend)
         send_telegram(msg)
         alerts_sent += 1
 
