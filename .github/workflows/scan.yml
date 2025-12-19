@@ -23,14 +23,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r scanner/requirements.txt
-
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner/scan.py
-        - name: Commit state.json (if changed)
+      - name: Commit state.json (if changed)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -41,6 +40,3 @@ jobs:
           else
             echo "state.json not created yet – skipping commit"
           fi
-            echo "state.json not created yet – skipping commit"
-          fi
-
