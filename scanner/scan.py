@@ -7,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-send_telegram("✅ NSE Scanner is live and working")
+
 # =========================
 # CONFIG
 # =========================
@@ -352,7 +352,7 @@ def format_alert(symbol: str, sig: dict, bar_time_ist: datetime) -> str:
 # =========================
 def main():
     dt_ist = now_ist()
-
+    send_telegram("✅ NSE Scanner is live and working")
     # Only run during market hours
     if not in_market_hours(dt_ist):
         print("Outside NSE market hours (IST) — exiting.")
