@@ -7,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
-
+send_telegram("✅ NSE Scanner is live and working")
 # =========================
 # CONFIG
 # =========================
