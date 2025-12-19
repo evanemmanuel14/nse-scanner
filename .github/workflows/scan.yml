@@ -30,16 +30,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner/scan.py
-
-      - name: Commit state.json (if changed)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          if [ -f scanner/state.json ]; then
-            git add scanner/state.json
-            git diff --cached --quiet || git commit -m "Update scanner state"
-            git push
           else
             echo "state.json not created yet – skipping commit"
           fi
